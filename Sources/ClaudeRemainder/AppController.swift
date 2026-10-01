@@ -3,7 +3,7 @@ import ClaudeRemainderCore
 import Foundation
 
 @MainActor
-final class AppController: NSObject {
+final class AppController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var statusBarIcon: NSImage?
 
@@ -101,6 +101,7 @@ final class AppController: NSObject {
 
     private func rebuildMenu() {
         let menu = NSMenu()
+        menu.delegate = self
 
         let title = NSMenuItem(title: "Claude Remainder", action: nil, keyEquivalent: "")
         title.isEnabled = false
@@ -421,6 +422,11 @@ final class AppController: NSObject {
 
     @objc private func quitAction() {
         NSApp.terminate(nil)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        // Refresh usage whenever the status menu is opened for fresher values.
+        Task { await refreshAll(manualTriggered: true) }
     }
 
     private func profileFrom(sender: NSMenuItem) -> AccountProfile? {
