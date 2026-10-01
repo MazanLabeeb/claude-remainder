@@ -56,7 +56,7 @@ final class DashboardWindowController: NSWindowController {
 
             if let snapshot = snapshots[profile.id] {
                 for window in snapshot.windows {
-                    lines.append("  \(window.label) used \(Int(window.usedPercent.rounded()))% (reset \(Self.clockTime(window.resetsAt)))")
+                    lines.append("  \(window.label) used \(Int(window.usedPercent.rounded()))% (reset \(Self.resetLabel(window.resetsAt)))")
                 }
 
                 if settings.showMetadataInDashboard, !snapshot.metadata.isEmpty {
@@ -170,5 +170,22 @@ final class DashboardWindowController: NSWindowController {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+
+    private static func resetLabel(_ date: Date) -> String {
+        let calendar = Calendar.current
+        let time = clockTime(date)
+
+        if calendar.isDateInToday(date) {
+            return "today \(time)"
+        }
+        if calendar.isDateInTomorrow(date) {
+            return "tomorrow \(time)"
+        }
+
+        let weekdayFormatter = DateFormatter()
+        weekdayFormatter.dateFormat = "EEE"
+        let weekday = weekdayFormatter.string(from: date).lowercased()
+        return "\(weekday) \(time)"
     }
 }

@@ -100,7 +100,14 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func rebuildMenu() {
-        let menu = NSMenu()
+        let menu: NSMenu
+        if let existingMenu = statusItem.menu {
+            menu = existingMenu
+            menu.removeAllItems()
+        } else {
+            menu = NSMenu()
+            statusItem.menu = menu
+        }
         menu.delegate = self
 
         let title = NSMenuItem(title: "Claude Remainder", action: nil, keyEquivalent: "")
@@ -176,7 +183,6 @@ final class AppController: NSObject, NSMenuDelegate {
         quit.target = self
         menu.addItem(quit)
 
-        statusItem.menu = menu
         updateStatusBarButton()
 
         dashboardWindowController?.update(
@@ -205,7 +211,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
         if let snapshot = snapshots[profile.id] {
             for window in snapshot.windows {
-                let line = "   \(riskGlyph(for: window.usedPercent)) \(window.label) used \(Int(window.usedPercent.rounded()))% (reset \(Self.clockTime(window.resetsAt)))"
+                let line = "   \(riskGlyph(for: window.usedPercent)) \(window.label) used \(Int(window.usedPercent.rounded()))% (reset \(Self.resetLabel(window.resetsAt)))"
                 let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
                 item.isEnabled = false
                 menu.addItem(item)
@@ -716,5 +722,22 @@ final class AppController: NSObject, NSMenuDelegate {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+
+    private static func resetLabel(_ date: Date) -> String {
+        let calendar = Calendar.current
+        let time = clockTime(date)
+
+        if calendar.isDateInToday(date) {
+            return "today \(time)"
+        }
+        if calendar.isDateInTomorrow(date) {
+            return "tomorrow \(time)"
+        }
+
+        let weekdayFormatter = DateFormatter()
+        weekdayFormatter.dateFormat = "EEE"
+        let weekday = weekdayFormatter.string(from: date).lowercased()
+        return "\(weekday) \(time)"
     }
 }
