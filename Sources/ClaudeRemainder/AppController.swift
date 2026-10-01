@@ -5,10 +5,12 @@ import Foundation
 @MainActor
 final class AppController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private var statusBarIcon: NSImage?
 
     private var settings: AppSettings
     private var snapshots: [UUID: AccountUsageSnapshot]
     private var states: [UUID: AccountUsageState] = [:]
+    private var profileDisplayNames: [UUID: String] = [:]
 
     private let settingsStore: SettingsStore
     private let snapshotStore: SnapshotStore
@@ -23,6 +25,8 @@ final class AppController: NSObject {
     private var networkRefreshCount = 0
     private var resourceSampler = ResourceSampler()
     private var resourceWindowController: ResourceWindowController?
+    private var dashboardWindowController: DashboardWindowController?
+    private var settingsWindowController: SettingsWindowController?
 
     init(paths: AppPaths? = nil) {
         let resolvedPaths: AppPaths
@@ -57,24 +61,42 @@ final class AppController: NSObject {
     }
 
     func start() {
-        if let button = statusItem.button {
-            button.title = menuBarTitle
-            button.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        }
+        refreshProfileDisplayNames()
+        configureStatusBarIcon()
+
+        updateStatusBarButton()
 
         configureAutoRefresh()
         rebuildMenu()
+
+        Task { await refreshAll(manualTriggered: true) }
+
+        if !settings.hasSeenDashboardWindow {
+            settings.hasSeenDashboardWindow = true
+            saveSettings()
+            openDashboardWindow()
+        }
     }
 
     private var menuBarTitle: String {
-        let enabledProfiles = settings.profiles.filter(\.isEnabled)
-        guard !enabledProfiles.isEmpty else { return "CR" }
+        guard let profile = defaultStatusProfile() else {
+            return "CR"
+        }
 
-        let sessionValues = enabledProfiles.compactMap { snapshots[$0.id]?.window(named: "Session")?.remainingPercent }
-        guard !sessionValues.isEmpty else { return "CR" }
+        guard let used = snapshots[profile.id]?.window(named: "Session")?.usedPercent else {
+            return "--"
+        }
 
-        let average = sessionValues.reduce(0, +) / Double(sessionValues.count)
-        return String(format: "CR %.0f%%", average)
+        return String(format: "%.0f%%", used)
+    }
+
+    private func defaultStatusProfile() -> AccountProfile? {
+        if let defaultID = settings.defaultProfileID,
+           let profile = settings.profiles.first(where: { $0.id == defaultID }) {
+            return profile
+        }
+
+        return settings.profiles.first(where: { $0.isEnabled })
     }
 
     private func rebuildMenu() {
@@ -84,11 +106,52 @@ final class AppController: NSObject {
         title.isEnabled = false
         menu.addItem(title)
 
-        let subtitle = NSMenuItem(title: "See what remains", action: nil, keyEquivalent: "")
-        subtitle.isEnabled = false
-        menu.addItem(subtitle)
+        if let defaultProfile = defaultStatusProfile() {
+            let subtitle = NSMenuItem(
+                title: "Status profile: \(displayName(for: defaultProfile))",
+                action: nil,
+                keyEquivalent: ""
+            )
+            subtitle.isEnabled = false
+            menu.addItem(subtitle)
+        } else {
+            let subtitle = NSMenuItem(title: "Set default profile in Settings", action: nil, keyEquivalent: "")
+            subtitle.isEnabled = false
+            menu.addItem(subtitle)
+        }
+
+        let dashboardItem = NSMenuItem(title: "Open Dashboard…", action: #selector(openDashboardWindow), keyEquivalent: "d")
+        dashboardItem.target = self
+        menu.addItem(dashboardItem)
+
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettingsWindow), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         menu.addItem(.separator())
+
+        if settings.profiles.isEmpty {
+            let noAccount = NSMenuItem(title: "No accounts configured", action: nil, keyEquivalent: "")
+            noAccount.isEnabled = false
+            menu.addItem(noAccount)
+        } else {
+            for (index, profile) in settings.profiles.enumerated() {
+                if index > 0 {
+                    menu.addItem(.separator())
+                }
+                appendFlatProfileRows(profile, to: menu)
+            }
+        }
+
+        menu.addItem(.separator())
+
+        let refreshAll = NSMenuItem(title: "Refresh All", action: #selector(refreshAllAction), keyEquivalent: "r")
+        refreshAll.target = self
+        menu.addItem(refreshAll)
+
+        let addAccount = NSMenuItem(title: "Add Account…", action: #selector(addAccountAction), keyEquivalent: "")
+        addAccount.target = self
+        menu.addItem(addAccount)
 
         let refreshModeItem = NSMenuItem(title: "Auto Refresh", action: nil, keyEquivalent: "")
         let refreshSubmenu = NSMenu()
@@ -102,34 +165,6 @@ final class AppController: NSObject {
         refreshModeItem.submenu = refreshSubmenu
         menu.addItem(refreshModeItem)
 
-        let concurrencyItem = NSMenuItem(title: "Concurrent Refreshes: \(settings.maxConcurrentRefreshes)", action: nil, keyEquivalent: "")
-        let concurrencySubmenu = NSMenu()
-        for value in 1...4 {
-            let item = NSMenuItem(title: "\(value)", action: #selector(selectConcurrency(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = value
-            item.state = settings.maxConcurrentRefreshes == value ? .on : .off
-            concurrencySubmenu.addItem(item)
-        }
-        concurrencyItem.submenu = concurrencySubmenu
-        menu.addItem(concurrencyItem)
-
-        menu.addItem(.separator())
-
-        let addAccount = NSMenuItem(title: "Add Account…", action: #selector(addAccountAction), keyEquivalent: "")
-        addAccount.target = self
-        menu.addItem(addAccount)
-
-        for profile in settings.profiles {
-            menu.addItem(makeAccountMenuItem(for: profile))
-        }
-
-        menu.addItem(.separator())
-
-        let refreshAll = NSMenuItem(title: "Refresh All", action: #selector(refreshAllAction), keyEquivalent: "r")
-        refreshAll.target = self
-        menu.addItem(refreshAll)
-
         let resources = NSMenuItem(title: "Resource Usage…", action: #selector(openResourceWindow), keyEquivalent: "")
         resources.target = self
         menu.addItem(resources)
@@ -141,88 +176,76 @@ final class AppController: NSObject {
         menu.addItem(quit)
 
         statusItem.menu = menu
-        if let button = statusItem.button {
-            button.title = menuBarTitle
-        }
+        updateStatusBarButton()
+
+        dashboardWindowController?.update(
+            settings: settings,
+            snapshots: snapshots,
+            states: states,
+            menuBarTitle: menuBarTitle,
+            profileDisplayNames: profileDisplayNames
+        )
+
+        settingsWindowController?.update(
+            settings: settings,
+            profileDisplayNames: profileDisplayNames,
+            statusBarText: menuBarTitle
+        )
     }
 
-    private func makeAccountMenuItem(for profile: AccountProfile) -> NSMenuItem {
-        let item = NSMenuItem(title: profile.name, action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-
-        let status = profile.isEnabled ? "Enabled" : "Disabled"
-        let statusItem = NSMenuItem(title: "Status: \(status)", action: nil, keyEquivalent: "")
-        statusItem.isEnabled = false
-        submenu.addItem(statusItem)
+    private func appendFlatProfileRows(_ profile: AccountProfile, to menu: NSMenu) {
+        let header = NSMenuItem(
+            title: "\(profile.isEnabled ? "●" : "○") \(displayName(for: profile))",
+            action: nil,
+            keyEquivalent: ""
+        )
+        header.isEnabled = false
+        menu.addItem(header)
 
         if let snapshot = snapshots[profile.id] {
             for window in snapshot.windows {
-                let line = "\(window.label): \(Int(window.remainingPercent.rounded()))% left (reset \(Self.clockTime(window.resetsAt)))"
-                let lineItem = NSMenuItem(title: line, action: nil, keyEquivalent: "")
-                lineItem.isEnabled = false
-                submenu.addItem(lineItem)
+                let line = "   \(riskGlyph(for: window.usedPercent)) \(window.label) used \(Int(window.usedPercent.rounded()))% (reset \(Self.clockTime(window.resetsAt)))"
+                let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
             }
 
-            let freshness = NSMenuItem(
-                title: "Updated \(Self.relativeTime(snapshot.fetchedAt))",
-                action: nil,
-                keyEquivalent: ""
-            )
+            let freshness = NSMenuItem(title: "   Updated \(Self.relativeTime(snapshot.fetchedAt))", action: nil, keyEquivalent: "")
             freshness.isEnabled = false
-            submenu.addItem(freshness)
+            menu.addItem(freshness)
         } else {
-            let noData = NSMenuItem(title: "No usage data yet", action: nil, keyEquivalent: "")
+            let noData = NSMenuItem(title: "   No usage data yet", action: nil, keyEquivalent: "")
             noData.isEnabled = false
-            submenu.addItem(noData)
+            menu.addItem(noData)
         }
 
         if let state = states[profile.id], let error = state.lastError {
-            let errorItem = NSMenuItem(title: "Note: \(error.errorDescription ?? "Refresh failed")", action: nil, keyEquivalent: "")
+            let errorItem = NSMenuItem(title: "   Note: \(error.errorDescription ?? "Refresh failed")", action: nil, keyEquivalent: "")
             errorItem.isEnabled = false
-            submenu.addItem(errorItem)
+            menu.addItem(errorItem)
         }
 
-        submenu.addItem(.separator())
+        menu.addItem(actionMenuItem(title: "   Refresh \(profile.name)", selector: #selector(refreshProfileAction(_:)), profileID: profile.id))
+        menu.addItem(actionMenuItem(title: "   Login \(profile.name)", selector: #selector(loginProfileAction(_:)), profileID: profile.id))
+        menu.addItem(actionMenuItem(title: "   \(profile.isEnabled ? "Disable" : "Enable") \(profile.name)", selector: #selector(toggleProfileEnabled(_:)), profileID: profile.id))
+    }
 
-        let refreshItem = NSMenuItem(title: "Refresh", action: #selector(refreshProfileAction(_:)), keyEquivalent: "")
-        refreshItem.target = self
-        refreshItem.representedObject = profile.id.uuidString
-        submenu.addItem(refreshItem)
-
-        let loginItem = NSMenuItem(title: "Login", action: #selector(loginProfileAction(_:)), keyEquivalent: "")
-        loginItem.target = self
-        loginItem.representedObject = profile.id.uuidString
-        submenu.addItem(loginItem)
-
-        let toggleItem = NSMenuItem(title: profile.isEnabled ? "Disable" : "Enable", action: #selector(toggleProfileEnabled(_:)), keyEquivalent: "")
-        toggleItem.target = self
-        toggleItem.representedObject = profile.id.uuidString
-        submenu.addItem(toggleItem)
-
-        let editItem = NSMenuItem(title: "Edit…", action: #selector(editProfileAction(_:)), keyEquivalent: "")
-        editItem.target = self
-        editItem.representedObject = profile.id.uuidString
-        submenu.addItem(editItem)
-
-        let moveUp = NSMenuItem(title: "Move Up", action: #selector(moveProfileUpAction(_:)), keyEquivalent: "")
-        moveUp.target = self
-        moveUp.representedObject = profile.id.uuidString
-        moveUp.isEnabled = settings.profiles.first?.id != profile.id
-        submenu.addItem(moveUp)
-
-        let moveDown = NSMenuItem(title: "Move Down", action: #selector(moveProfileDownAction(_:)), keyEquivalent: "")
-        moveDown.target = self
-        moveDown.representedObject = profile.id.uuidString
-        moveDown.isEnabled = settings.profiles.last?.id != profile.id
-        submenu.addItem(moveDown)
-
-        let deleteItem = NSMenuItem(title: "Delete", action: #selector(deleteProfileAction(_:)), keyEquivalent: "")
-        deleteItem.target = self
-        deleteItem.representedObject = profile.id.uuidString
-        submenu.addItem(deleteItem)
-
-        item.submenu = submenu
+    private func actionMenuItem(title: String, selector: Selector, profileID: UUID) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+        item.target = self
+        item.representedObject = profileID.uuidString
         return item
+    }
+
+    private func riskGlyph(for usedPercent: Double) -> String {
+        switch usedPercent {
+        case 90...:
+            return "🔴"
+        case 70...:
+            return "🟠"
+        default:
+            return "🟢"
+        }
     }
 
     @objc private func selectAutoRefreshMode(_ sender: NSMenuItem) {
@@ -237,13 +260,6 @@ final class AppController: NSObject {
         rebuildMenu()
     }
 
-    @objc private func selectConcurrency(_ sender: NSMenuItem) {
-        guard let value = sender.representedObject as? Int else { return }
-        settings.maxConcurrentRefreshes = max(1, min(value, 4))
-        saveSettings()
-        rebuildMenu()
-    }
-
     @objc private func addAccountAction() {
         guard var profile = promptForProfile(existing: nil) else { return }
 
@@ -254,24 +270,15 @@ final class AppController: NSObject {
 
         settings.profiles.append(profile)
         states[profile.id] = AccountUsageState(status: .idle)
+        refreshDisplayName(for: profile)
+
+        if settings.defaultProfileID == nil {
+            settings.defaultProfileID = profile.id
+        }
+
         saveSettings()
         rebuildMenu()
         launchLogin(for: profile)
-    }
-
-    @objc private func editProfileAction(_ sender: NSMenuItem) {
-        guard let profile = profileFrom(sender: sender),
-              let updated = promptForProfile(existing: profile) else {
-            return
-        }
-
-        guard let index = settings.profiles.firstIndex(where: { $0.id == profile.id }) else {
-            return
-        }
-
-        settings.profiles[index] = updated
-        saveSettings()
-        rebuildMenu()
     }
 
     @objc private func toggleProfileEnabled(_ sender: NSMenuItem) {
@@ -281,56 +288,12 @@ final class AppController: NSObject {
         }
 
         settings.profiles[index].isEnabled.toggle()
-        saveSettings()
-        rebuildMenu()
-    }
 
-    @objc private func moveProfileUpAction(_ sender: NSMenuItem) {
-        guard let profile = profileFrom(sender: sender),
-              let index = settings.profiles.firstIndex(where: { $0.id == profile.id }),
-              index > 0 else {
-            return
+        if settings.defaultProfileID == profile.id, settings.profiles[index].isEnabled == false {
+            settings.defaultProfileID = settings.profiles.first(where: { $0.isEnabled })?.id
         }
 
-        settings.profiles.swapAt(index, index - 1)
         saveSettings()
-        rebuildMenu()
-    }
-
-    @objc private func moveProfileDownAction(_ sender: NSMenuItem) {
-        guard let profile = profileFrom(sender: sender),
-              let index = settings.profiles.firstIndex(where: { $0.id == profile.id }),
-              index < settings.profiles.count - 1 else {
-            return
-        }
-
-        settings.profiles.swapAt(index, index + 1)
-        saveSettings()
-        rebuildMenu()
-    }
-
-    @objc private func deleteProfileAction(_ sender: NSMenuItem) {
-        guard let profile = profileFrom(sender: sender) else { return }
-
-        let alert = NSAlert()
-        alert.messageText = "Delete \(profile.name)?"
-        alert.informativeText = "This only removes the profile from Claude Remainder and does not delete Claude credentials from disk or keychain."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        settings.profiles.removeAll { $0.id == profile.id }
-        snapshots.removeValue(forKey: profile.id)
-        states.removeValue(forKey: profile.id)
-        nextAllowedRefreshAt.removeValue(forKey: profile.id)
-        failureCounts.removeValue(forKey: profile.id)
-        loginDetectionTasks[profile.id]?.cancel()
-        loginDetectionTasks.removeValue(forKey: profile.id)
-
-        saveSettings()
-        saveSnapshots()
         rebuildMenu()
     }
 
@@ -346,6 +309,97 @@ final class AppController: NSObject {
     @objc private func loginProfileAction(_ sender: NSMenuItem) {
         guard let profile = profileFrom(sender: sender) else { return }
         launchLogin(for: profile)
+    }
+
+    @objc private func openDashboardWindow() {
+        if dashboardWindowController == nil {
+            dashboardWindowController = DashboardWindowController(
+                refreshAll: { [weak self] in
+                    Task { await self?.refreshAll(manualTriggered: true) }
+                },
+                addAccount: { [weak self] in
+                    self?.addAccountAction()
+                },
+                openResourceUsage: { [weak self] in
+                    self?.openResourceWindow()
+                }
+            )
+        }
+
+        dashboardWindowController?.update(
+            settings: settings,
+            snapshots: snapshots,
+            states: states,
+            menuBarTitle: menuBarTitle,
+            profileDisplayNames: profileDisplayNames
+        )
+        dashboardWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func openSettingsWindow() {
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController(
+                onSaveProfile: { [weak self] profile in
+                    self?.saveProfileFromSettings(profile)
+                },
+                onSetDefaultProfile: { [weak self] profileID in
+                    self?.setDefaultProfile(profileID)
+                },
+                onSetMetadataVisibility: { [weak self] isVisible in
+                    self?.setMetadataVisibilityInDashboard(isVisible)
+                },
+                onAddAccount: { [weak self] in
+                    self?.addAccountAction()
+                }
+            )
+        }
+
+        settingsWindowController?.update(
+            settings: settings,
+            profileDisplayNames: profileDisplayNames,
+            statusBarText: menuBarTitle
+        )
+        settingsWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func saveProfileFromSettings(_ profile: AccountProfile) {
+        guard let index = settings.profiles.firstIndex(where: { $0.id == profile.id }) else {
+            return
+        }
+
+        settings.profiles[index] = profile
+        refreshDisplayName(for: profile)
+
+        if settings.defaultProfileID == nil {
+            settings.defaultProfileID = profile.id
+        }
+
+        if let defaultID = settings.defaultProfileID,
+           settings.profiles.contains(where: { $0.id == defaultID }) == false {
+            settings.defaultProfileID = settings.profiles.first(where: { $0.isEnabled })?.id
+        }
+
+        saveSettings()
+        rebuildMenu()
+    }
+
+    private func setDefaultProfile(_ profileID: UUID?) {
+        if let profileID,
+           let index = settings.profiles.firstIndex(where: { $0.id == profileID }) {
+            settings.profiles[index].isEnabled = true
+        }
+
+        settings.defaultProfileID = profileID
+        saveSettings()
+        rebuildMenu()
+    }
+
+    private func setMetadataVisibilityInDashboard(_ isVisible: Bool) {
+        settings.showMetadataInDashboard = isVisible
+        saveSettings()
+        rebuildMenu()
     }
 
     @objc private func openResourceWindow() {
@@ -408,30 +462,46 @@ final class AppController: NSObject {
             let chunkEnd = min(chunkStart + maxConcurrent, targets.count)
             let chunk = Array(targets[chunkStart..<chunkEnd])
 
-            await withTaskGroup(of: (UUID, Result<AccountUsageSnapshot, UsageFetchError>).self) { group in
+            await withTaskGroup(of: (UUID, Result<AccountUsageSnapshot, UsageFetchError>, String?).self) { group in
                 for profile in chunk {
                     group.addTask { [credentialReader, usageClient] in
                         guard let credentials = credentialReader.readCredentials(for: profile) else {
-                            return (profile.id, .failure(.missingCredentials))
+                            return (profile.id, .failure(.missingCredentials), nil)
                         }
 
                         do {
-                            let windows = try await usageClient.fetchUsage(accessToken: credentials.accessToken)
+                            let payload = try await usageClient.fetchUsage(accessToken: credentials.accessToken)
                             return (
                                 profile.id,
-                                .success(AccountUsageSnapshot(profileID: profile.id, fetchedAt: Date(), windows: windows))
+                                .success(
+                                    AccountUsageSnapshot(
+                                        profileID: profile.id,
+                                        fetchedAt: Date(),
+                                        windows: payload.windows,
+                                        metadata: payload.metadata
+                                    )
+                                ),
+                                credentials.email
                             )
                         } catch let error as UsageFetchError {
-                            return (profile.id, .failure(error))
+                            return (profile.id, .failure(error), credentials.email)
                         } catch {
-                            return (profile.id, .failure(.network(error.localizedDescription)))
+                            return (profile.id, .failure(.network(error.localizedDescription)), credentials.email)
                         }
                     }
                 }
 
-                for await (profileID, result) in group {
+                for await (profileID, result, email) in group {
                     networkRefreshCount += 1
                     applyRefreshResult(profileID: profileID, result: result)
+
+                    if let profile = settings.profiles.first(where: { $0.id == profileID }) {
+                        if let email, isPlaceholderName(profile.name) {
+                            profileDisplayNames[profile.id] = "\(email) (\(profile.name))"
+                        } else {
+                            refreshDisplayName(for: profile)
+                        }
+                    }
                 }
             }
         }
@@ -564,8 +634,54 @@ final class AppController: NSObject {
         )
     }
 
+    private func refreshProfileDisplayNames() {
+        for profile in settings.profiles {
+            refreshDisplayName(for: profile)
+        }
+    }
+
+    private func refreshDisplayName(for profile: AccountProfile) {
+        guard let credentials = credentialReader.readCredentials(for: profile),
+              let email = credentials.email else {
+            profileDisplayNames[profile.id] = profile.name
+            return
+        }
+
+        if isPlaceholderName(profile.name) {
+            profileDisplayNames[profile.id] = "\(email) (\(profile.name))"
+        } else {
+            profileDisplayNames[profile.id] = profile.name
+        }
+    }
+
+    private func displayName(for profile: AccountProfile) -> String {
+        profileDisplayNames[profile.id] ?? profile.name
+    }
+
+    private func isPlaceholderName(_ name: String) -> Bool {
+        name == "Default" || name.hasPrefix("Account ")
+    }
+
     private func saveSettings() {
         try? settingsStore.save(settings)
+    }
+
+    private func configureStatusBarIcon() {
+        guard statusBarIcon == nil else { return }
+
+        let icon = NSApp.applicationIconImage.copy() as? NSImage
+        icon?.size = NSSize(width: 16, height: 16)
+        icon?.isTemplate = false
+        statusBarIcon = icon
+    }
+
+    private func updateStatusBarButton() {
+        guard let button = statusItem.button else { return }
+
+        button.image = statusBarIcon
+        button.imagePosition = .imageLeading
+        button.title = " \(menuBarTitle)"
+        button.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
     }
 
     private func saveSnapshots() {

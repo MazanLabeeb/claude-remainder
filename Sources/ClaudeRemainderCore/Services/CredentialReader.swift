@@ -3,6 +3,12 @@ import Security
 
 public struct OAuthCredentials: Equatable {
     public var accessToken: String
+    public var email: String?
+
+    public init(accessToken: String, email: String? = nil) {
+        self.accessToken = accessToken
+        self.email = email
+    }
 }
 
 public final class CredentialReader {
@@ -55,7 +61,7 @@ public final class CredentialReader {
             return nil
         }
 
-        return OAuthCredentials(accessToken: token)
+        return OAuthCredentials(accessToken: token, email: extractEmail(from: dictionary))
     }
 
     private static func extractAccessToken(from dictionary: [String: Any]) -> String? {
@@ -88,5 +94,29 @@ public final class CredentialReader {
         }
 
         return current
+    }
+
+    private static func extractEmail(from dictionary: [String: Any]) -> String? {
+        let keyPaths: [[String]] = [
+            ["email"],
+            ["accountEmail"],
+            ["claudeAiOauth", "email"],
+            ["claudeAiOauth", "account", "email"],
+            ["claudeAiOauth", "user", "email"],
+            ["oauth", "email"],
+            ["oauth", "user", "email"],
+            ["user", "email"]
+        ]
+
+        for keyPath in keyPaths {
+            if let value = value(for: keyPath, in: dictionary) as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.contains("@"), !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
+        }
+
+        return nil
     }
 }

@@ -2,18 +2,21 @@
 
 See what remains.
 
-Claude Remainder is a minimal native macOS menu-bar app for checking remaining Claude Pro/Max quota across any number of Claude Code accounts.
+Claude Remainder is a minimal native macOS menu-bar app for checking used Claude Pro/Max quota across any number of Claude Code accounts.
 
 ## Why this exists
 
-Switching between multiple Claude accounts to check session + weekly usage is slow. Claude Remainder keeps all configured accounts in one status menu with:
+Switching between multiple Claude accounts to check session + weekly usage is slow. Claude Remainder keeps all configured accounts in one status menu and dashboard with:
 
-- Session and weekly remaining percentages
+- Session and weekly used percentages
+- Status bar shows used session percent for your selected default profile
 - Reset times
 - Manual refresh (default)
 - Optional conservative auto-refresh (15/30/60 min)
 - Per-account login and profile management
 - On-demand CPU/memory diagnostics
+- First-launch interactive dashboard window (can be reopened later)
+- Settings window to rename profiles and choose default status profile
 
 ## Important caveats
 

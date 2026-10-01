@@ -12,7 +12,7 @@ public final class UsageAPIClient {
         self.endpoint = endpoint
     }
 
-    public func fetchUsage(accessToken: String) async throws -> [UsageWindow] {
+    public func fetchUsage(accessToken: String) async throws -> UsageResponsePayload {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -46,7 +46,13 @@ public final class UsageAPIClient {
             throw UsageFetchError.responseMalformed
         }
 
-        return try Self.parseUsageWindows(from: dictionary)
+        return try Self.parseUsagePayload(from: dictionary)
+    }
+
+    public static func parseUsagePayload(from response: [String: Any]) throws -> UsageResponsePayload {
+        let windows = try parseUsageWindows(from: response)
+        let metadata = parseMetadata(from: response)
+        return UsageResponsePayload(windows: windows, metadata: metadata)
     }
 
     public static func parseUsageWindows(from response: [String: Any]) throws -> [UsageWindow] {
@@ -106,6 +112,40 @@ public final class UsageAPIClient {
         }
 
         return sorted
+    }
+
+    private static func parseMetadata(from response: [String: Any]) -> [UsageMetadataItem] {
+        var items: [UsageMetadataItem] = []
+
+        if let extraUsage = response["extra_usage"] as? [String: Any] {
+            if let enabled = extraUsage["is_enabled"] as? Bool {
+                items.append(UsageMetadataItem(key: "Overage enabled", value: enabled ? "yes" : "no"))
+            }
+            if let monthlyLimit = extraUsage["monthly_limit"] {
+                items.append(UsageMetadataItem(key: "Overage monthly limit", value: "\(monthlyLimit)"))
+            }
+            if let usedCredits = extraUsage["used_credits"] {
+                items.append(UsageMetadataItem(key: "Overage used credits", value: "\(usedCredits)"))
+            }
+            if let utilization = extraUsage["utilization"] {
+                items.append(UsageMetadataItem(key: "Overage utilization", value: "\(utilization)"))
+            }
+        }
+
+        if let limits = response["limits"] as? [[String: Any]] {
+            let scopedCount = limits.filter { ($0["kind"] as? String) == "weekly_scoped" }.count
+            if scopedCount > 0 {
+                items.append(UsageMetadataItem(key: "Scoped weekly limits", value: "\(scopedCount)"))
+            }
+        }
+
+        for key in ["subscription_type", "plan", "account_id", "user_id"] {
+            if let value = response[key] {
+                items.append(UsageMetadataItem(key: key.replacingOccurrences(of: "_", with: " ").capitalized, value: "\(value)"))
+            }
+        }
+
+        return items
     }
 
     private static func sortPriority(label: String) -> String {

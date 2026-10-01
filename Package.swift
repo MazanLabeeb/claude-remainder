@@ -27,6 +27,8 @@ let package = Package(
             sources: [
                 "main.swift",
                 "AppController.swift",
+                "DashboardWindowController.swift",
+                "SettingsWindowController.swift",
                 "ResourceWindowController.swift"
             ],
             resources: [
