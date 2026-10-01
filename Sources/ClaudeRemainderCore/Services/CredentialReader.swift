@@ -1,0 +1,92 @@
+import Foundation
+import Security
+
+public struct OAuthCredentials: Equatable {
+    public var accessToken: String
+}
+
+public final class CredentialReader {
+    public init() {}
+
+    public func readCredentials(for profile: AccountProfile) -> OAuthCredentials? {
+        if let fromKeychain = readFromKeychain(profile: profile) {
+            return fromKeychain
+        }
+
+        return readFromFile(profile: profile)
+    }
+
+    private func readFromKeychain(profile: AccountProfile) -> OAuthCredentials? {
+        let service = profile.keychainServiceName()
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess,
+              let data = item as? Data else {
+            return nil
+        }
+
+        return Self.parseCredentialData(data)
+    }
+
+    private func readFromFile(profile: AccountProfile) -> OAuthCredentials? {
+        let fileURL = profile
+            .resolvedConfigDirectory()
+            .appendingPathComponent(".credentials.json")
+
+        guard let data = try? Data(contentsOf: fileURL) else {
+            return nil
+        }
+
+        return Self.parseCredentialData(data)
+    }
+
+    private static func parseCredentialData(_ data: Data) -> OAuthCredentials? {
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any],
+              let token = extractAccessToken(from: dictionary) else {
+            return nil
+        }
+
+        return OAuthCredentials(accessToken: token)
+    }
+
+    private static func extractAccessToken(from dictionary: [String: Any]) -> String? {
+        let keyPaths: [[String]] = [
+            ["accessToken"],
+            ["access_token"],
+            ["claudeAiOauth", "accessToken"],
+            ["claudeAiOauth", "access_token"],
+            ["oauth", "accessToken"],
+            ["oauth", "access_token"]
+        ]
+
+        for keyPath in keyPaths {
+            if let value = value(for: keyPath, in: dictionary) as? String,
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
+        }
+
+        return nil
+    }
+
+    private static func value(for keyPath: [String], in dictionary: [String: Any]) -> Any? {
+        var current: Any = dictionary
+        for key in keyPath {
+            guard let next = (current as? [String: Any])?[key] else {
+                return nil
+            }
+            current = next
+        }
+
+        return current
+    }
+}

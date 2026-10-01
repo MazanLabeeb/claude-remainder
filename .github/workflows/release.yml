@@ -1,0 +1,34 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release bundle
+        run: ./scripts/build-app.sh release
+
+      - name: Zip app
+        run: |
+          cd dist
+          zip -r "ClaudeRemainder-${GITHUB_REF_NAME}.zip" "Claude Remainder.app"
+
+      - name: Generate checksum
+        run: |
+          cd dist
+          shasum -a 256 "ClaudeRemainder-${GITHUB_REF_NAME}.zip" > "ClaudeRemainder-${GITHUB_REF_NAME}.zip.sha256"
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ClaudeRemainder-${{ github.ref_name }}.zip
+            dist/ClaudeRemainder-${{ github.ref_name }}.zip.sha256
