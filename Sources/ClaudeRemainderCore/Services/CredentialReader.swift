@@ -11,15 +11,39 @@ public struct OAuthCredentials: Equatable {
     }
 }
 
-public final class CredentialReader {
+/// Reads Claude Code credentials and caches them in memory, so the Keychain
+/// (and its macOS access prompt) is only hit when a token is missing or rejected.
+public final class CredentialReader: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cache: [String: OAuthCredentials] = [:]
+
     public init() {}
 
-    public func readCredentials(for profile: AccountProfile) -> OAuthCredentials? {
-        if let fromKeychain = readFromKeychain(profile: profile) {
-            return fromKeychain
+    public func readCredentials(for profile: AccountProfile, forceReload: Bool = false) -> OAuthCredentials? {
+        let cacheKey = profile.keychainServiceName()
+
+        if !forceReload, let cached = cachedCredentials(forKey: cacheKey) {
+            return cached
         }
 
-        return readFromFile(profile: profile)
+        let credentials = readFromKeychain(profile: profile) ?? readFromFile(profile: profile)
+
+        lock.lock()
+        cache[cacheKey] = credentials
+        lock.unlock()
+
+        return credentials
+    }
+
+    /// Returns cached credentials without touching the Keychain.
+    public func cachedCredentials(for profile: AccountProfile) -> OAuthCredentials? {
+        cachedCredentials(forKey: profile.keychainServiceName())
+    }
+
+    private func cachedCredentials(forKey key: String) -> OAuthCredentials? {
+        lock.lock()
+        defer { lock.unlock() }
+        return cache[key]
     }
 
     private func readFromKeychain(profile: AccountProfile) -> OAuthCredentials? {

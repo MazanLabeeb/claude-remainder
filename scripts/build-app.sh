@@ -54,6 +54,10 @@ if [[ -f "$ICON_JPEG_PATH" ]]; then
 fi
 
 chmod +x "$BUNDLE_PATH/Contents/MacOS/$EXECUTABLE_NAME"
-codesign --force --sign - "$BUNDLE_PATH" >/dev/null 2>&1 || true
+# Ad-hoc signing ("-") changes identity on every build, so macOS forgets
+# "Always Allow" Keychain grants. Set CODESIGN_IDENTITY to a real certificate
+# (e.g. "Apple Development: Your Name (TEAMID)") to keep the grant across builds.
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+codesign --force --sign "$CODESIGN_IDENTITY" "$BUNDLE_PATH" >/dev/null 2>&1 || true
 
 echo "Built app bundle: $BUNDLE_PATH"

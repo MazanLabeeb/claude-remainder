@@ -477,12 +477,23 @@ final class AppController: NSObject, NSMenuDelegate {
             await withTaskGroup(of: (UUID, Result<AccountUsageSnapshot, UsageFetchError>, String?).self) { group in
                 for profile in chunk {
                     group.addTask { [credentialReader, usageClient] in
-                        guard let credentials = credentialReader.readCredentials(for: profile) else {
+                        guard var credentials = credentialReader.readCredentials(for: profile) else {
                             return (profile.id, .failure(.missingCredentials), nil)
                         }
 
                         do {
-                            let payload = try await usageClient.fetchUsage(accessToken: credentials.accessToken)
+                            let payload: UsageResponsePayload
+                            do {
+                                payload = try await usageClient.fetchUsage(accessToken: credentials.accessToken)
+                            } catch UsageFetchError.unauthorized {
+                                // Cached token was likely rotated by Claude Code; reload from the Keychain once.
+                                guard let reloaded = credentialReader.readCredentials(for: profile, forceReload: true),
+                                      reloaded.accessToken != credentials.accessToken else {
+                                    throw UsageFetchError.unauthorized
+                                }
+                                credentials = reloaded
+                                payload = try await usageClient.fetchUsage(accessToken: credentials.accessToken)
+                            }
                             return (
                                 profile.id,
                                 .success(
@@ -591,7 +602,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 try? await Task.sleep(for: .seconds(5))
                 guard let self else { return }
 
-                if self.credentialReader.readCredentials(for: profile) != nil {
+                if self.credentialReader.readCredentials(for: profile, forceReload: true) != nil {
                     await self.refreshProfiles([profile], manualTriggered: true)
                     return
                 }
@@ -653,7 +664,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func refreshDisplayName(for profile: AccountProfile) {
-        guard let credentials = credentialReader.readCredentials(for: profile),
+        guard let credentials = credentialReader.cachedCredentials(for: profile),
               let email = credentials.email else {
             profileDisplayNames[profile.id] = profile.name
             return
